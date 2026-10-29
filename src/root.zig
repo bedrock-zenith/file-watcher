@@ -31,7 +31,7 @@ const WatcherWindows = struct {
     pub fn next(watcher: *const @This(), buffer: []u8) ![]const u8 {
         var s_block: win.IO_STATUS_BLOCK = undefined;
 
-        var helper_buffer: ([4096]u8) align(@alignOf(win.FILE.NOTIFY.CHANGE)) = undefined;
+        var helper_buffer: ([32_768]u8) align(@alignOf(win.FILE.NOTIFY.CHANGE)) = undefined;
 
         const status = ntdll.NtNotifyChangeDirectoryFileEx(
             watcher.dir.handle,
@@ -57,8 +57,20 @@ const WatcherWindows = struct {
             .SUCCESS => brk: {
                 const information: *win.FILE.NOTIFY.INFORMATION = @ptrCast(&helper_buffer);
                 const data = information.fileName();
-                const size = try std.unicode.utf16LeToUtf8(buffer, data);
-                break :brk buffer[0..size];
+
+                var iterator: std.unicode.Wtf16LeIterator = .{ .bytes = @as([*]u8, @ptrCast(data.ptr))[0..(data.len << 1)], .i = 0 };
+                var index: usize = 0;
+                while (iterator.nextCodepoint()) |codepoint| {
+                    var length = try std.unicode.utf8CodepointSequenceLength(codepoint);
+                    const buf = buffer[index..];
+                    if (buf.len < length) {
+                        break :brk error.BufferOverflow;
+                    }
+                    length = try std.unicode.wtf8Encode(codepoint, buf);
+
+                    index +%= @intCast(length);
+                }
+                break :brk buffer[0..index];
             },
             .ACCESS_DENIED => error.AccessDenied,
             else => brk: {
